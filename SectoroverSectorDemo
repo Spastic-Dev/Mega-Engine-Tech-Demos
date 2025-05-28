@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sector Over Sector Raycasting Demo</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden; /* Prevent scrollbars */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #222; /* Dark background */
+            font-family: 'Inter', sans-serif; /* Use Inter font */
+            color: #eee;
+        }
+
+        #game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #333;
+            padding: 20px;
+            border-radius: 15px; /* Rounded corners */
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            max-width: 90vw; /* Responsive width */
+            max-height: 90vh; /* Responsive height */
+            box-sizing: border-box; /* Include padding in width/height */
+        }
+
+        canvas {
+            background-color: #000; /* Canvas background */
+            display: block;
+            border: 2px solid #555;
+            border-radius: 8px; /* Rounded corners for canvas */
+            width: 100%; /* Make canvas fluid */
+            height: auto; /* Maintain aspect ratio */
+            max-width: 800px; /* Max width for desktop */
+            max-height: 600px; /* Max height for desktop */
+        }
+
+        #controls {
+            margin-top: 15px;
+            text-align: center;
+            font-size: 0.9em;
+            line-height: 1.4;
+        }
+
+        #controls p {
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <canvas id="gameCanvas"></canvas>
+        <div id="controls">
+            <p><strong>Controls:</strong></p>
+            <p><strong>W</strong> - Move Forward</p>
+            <p><strong>S</strong> - Move Backward</p>
+            <p><strong>A</strong> - Turn Left</p>
+            <p><strong>D</strong> - Turn Right</p>
+        </div>
+    </div>
+
+    <script>
+        // Get the canvas element and its 2D rendering context
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Game configuration
+        const screenWidth = 640; // Resolution width for raycasting calculations
+        const screenHeight = 480; // Resolution height for raycasting calculations
+        const mapWidth = 24; // Width of the game map
+        const mapHeight = 24; // Height of the game map
+
+        // Player properties
+        let playerX = 22.0; // Player's starting X position
+        let playerY = 11.5; // Player's starting Y position
+        let playerZ = 0.5;  // Player's Z height (eye level relative to current sector's floor, 0.0 to 1.0)
+        let dirX = -1.0; // Player's initial direction vector X
+        let dirY = 0.0; // Player's initial direction vector Y
+        let planeX = 0.0; // Camera plane vector X (perpendicular to direction, defines FOV)
+        let planeY = 0.66; // Camera plane vector Y (0.66 for 66 degree FOV)
+        const moveSpeed = 0.08; // Player movement speed
+        const rotSpeed = 0.04; // Player rotation speed
+
+        // Define sectors with their properties (floorHeight, ceilingHeight, colors)
+        // Heights are normalized (0.0 to 1.0, where 1.0 is full map cell height)
+        // Each sector has a floor height, ceiling height, and distinct colors for floor, ceiling, and walls.
+        const sectors = [
+            { floorHeight: 0.0, ceilingHeight: 1.0, floorColor: '#666666', ceilingColor: '#87CEEB', wallColor: '#FF0000' }, // Sector 0: Default (Red walls)
+            { floorHeight: 0.0, ceilingHeight: 0.5, floorColor: '#555555', ceilingColor: '#AAAAAA', wallColor: '#00FF00' }, // Sector 1: Lower Ceiling (Green walls)
+            { floorHeight: 0.2, ceilingHeight: 1.0, floorColor: '#777777', ceilingColor: '#87CEEB', wallColor: '#0000FF' }, // Sector 2: Raised Floor (Blue walls)
+            { floorHeight: 0.0, ceilingHeight: 1.0, floorColor: '#444444', ceilingColor: '#BBBBBB', wallColor: '#FFFF00' }, // Sector 3: Yellow walls (for moving cube)
+            { floorHeight: 0.1, ceilingHeight: 0.9, floorColor: '#333333', ceilingColor: '#CCCCCC', wallColor: '#FF00FF' }, // Sector 4: Magenta walls (Stair step 1)
+            { floorHeight: 0.2, ceilingHeight: 0.9, floorColor: '#333333', ceilingColor: '#CCCCCC', wallColor: '#FF00FF' }, // Sector 5: Magenta walls (Stair step 2)
+            { floorHeight: 0.3, ceilingHeight: 0.9, floorColor: '#333333', ceilingColor: '#CCCCCC', wallColor: '#FF00FF' }, // Sector 6: Magenta walls (Stair step 3)
+            { floorHeight: 0.4, ceilingHeight: 0.9, floorColor: '#333333', ceilingColor: '#CCCCCC', wallColor: '#FF00FF' }, // Sector 7: Magenta walls (Stair step 4)
+        ];
+
+        // Map now stores sector IDs instead of just 0/1
+        // Each number represents an index into the `sectors` array
+        const worldMap = [
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,2,0,2,0,2,0,0,0,0],
+            [0,0,0,0,0,0,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,1,0,0,0,1,0,0,0,0,2,0,0,0,2,0,0,0,0],
+            [0,0,0,0,0,0,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,1,1,0,1,1,0,0,0,0,2,0,2,0,2,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,3,3,3,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,3,0,3,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,3,0,0,0,0,4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0], // Staircase (sectors 4,5,6,7)
+            [0,3,0,3,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,3,0,3,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+        ];
+
+        // For the moving cube/platform animation
+        const movingCubeSectorIndex = 3; // Index of the sector for the moving cube area (yellow walls)
+        const cubeMinCeilingHeight = 0.2; // Lowest point the cube will go
+        const cubeMaxCeilingHeight = 0.8; // Highest point the cube will go
+        let cubeMovingUp = true; // Direction of cube movement
+        const cubeSpeed = 0.002; // Speed at which the cube moves
+
+        // Key states
+        const keys = {};
+        window.addEventListener('keydown', (e) => { keys[e.key.toLowerCase()] = true; });
+        window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+        // Z-buffer for depth sorting (stores distance to nearest wall for each column)
+        const zBuffer = new Array(screenWidth);
+
+        /**
+         * Resizes the canvas to fit the container and maintains aspect ratio.
+         */
+        function resizeCanvas() {
+            const container = document.getElementById('game-container');
+            const containerWidth = container.clientWidth - 40; // Account for padding
+            const containerHeight = container.clientHeight - 40 - document.getElementById('controls').offsetHeight;
+
+            // Calculate target dimensions based on aspect ratio
+            let targetWidth = containerWidth;
+            let targetHeight = containerWidth * (screenHeight / screenWidth);
+
+            if (targetHeight > containerHeight) {
+                targetHeight = containerHeight;
+                targetWidth = containerHeight * (screenWidth / screenHeight);
+            }
+
+            canvas.style.width = `${targetWidth}px`;
+            canvas.style.height = `${targetHeight}px`;
+
+            // Set internal canvas resolution (important for drawing quality)
+            canvas.width = screenWidth;
+            canvas.height = screenHeight;
+        }
+
+        // Initial resize and add event listener for window resize
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas(); // Call once to set initial size
+
+        /**
+         * Main game loop function.
+         * This function is responsible for updating game state and rendering the scene.
+         */
+        function gameLoop() {
+            update(); // Update player position and direction, and animate elements
+            draw();   // Render the scene
+            requestAnimationFrame(gameLoop); // Request next frame
+        }
+
+        /**
+         * Updates the player's position and direction based on keyboard input.
+         * Also handles the animation of the moving cube.
+         */
+        function update() {
+            // Get the current sector the player is in for collision detection
+            const currentSectorMapX = Math.floor(playerX);
+            const currentSectorMapY = Math.floor(playerY);
+            const currentSectorId = worldMap[currentSectorMapX][currentSectorMapY];
+            const currentSector = sectors[currentSectorId];
+
+            // Move forward
+            if (keys['w']) {
+                const newPlayerX = playerX + dirX * moveSpeed;
+                const newPlayerY = playerY + dirY * moveSpeed;
+                // Check collision with walls. Player can only move if the destination cell is not a wall (i.e., has a sector ID)
+                // Also check if the destination sector's floor is not too high to step onto
+                if (newPlayerX >= 0 && newPlayerX < mapWidth && newPlayerY >= 0 && newPlayerY < mapHeight) {
+                    const destSectorId = worldMap[Math.floor(newPlayerX)][Math.floor(playerY)];
+                    if (destSectorId !== undefined && sectors[destSectorId].floorHeight <= currentSector.floorHeight + 0.2) { // Allow small steps
+                        playerX = newPlayerX;
+                    }
+                    const destSectorIdY = worldMap[Math.floor(playerX)][Math.floor(newPlayerY)];
+                    if (destSectorIdY !== undefined && sectors[destSectorIdY].floorHeight <= currentSector.floorHeight + 0.2) { // Allow small steps
+                        playerY = newPlayerY;
+                    }
+                }
+            }
+            // Move backward
+            if (keys['s']) {
+                const newPlayerX = playerX - dirX * moveSpeed;
+                const newPlayerY = playerY - dirY * moveSpeed;
+                if (newPlayerX >= 0 && newPlayerX < mapWidth && newPlayerY >= 0 && newPlayerY < mapHeight) {
+                    const destSectorId = worldMap[Math.floor(newPlayerX)][Math.floor(playerY)];
+                    if (destSectorId !== undefined && sectors[destSectorId].floorHeight <= currentSector.floorHeight + 0.2) {
+                        playerX = newPlayerX;
+                    }
+                    const destSectorIdY = worldMap[Math.floor(playerX)][Math.floor(newPlayerY)];
+                    if (destSectorIdY !== undefined && sectors[destSectorIdY].floorHeight <= currentSector.floorHeight + 0.2) {
+                        playerY = newPlayerY;
+                    }
+                }
+            }
+            // Turn right
+            if (keys['d']) {
+                // Rotate player direction vector
+                const oldDirX = dirX;
+                dirX = dirX * Math.cos(-rotSpeed) - dirY * Math.sin(-rotSpeed);
+                dirY = oldDirX * Math.sin(-rotSpeed) + dirY * Math.cos(-rotSpeed);
+                // Rotate camera plane vector
+                const oldPlaneX = planeX;
+                planeX = planeX * Math.cos(-rotSpeed) - planeY * Math.sin(-rotSpeed);
+                planeY = oldPlaneX * Math.sin(-rotSpeed) + planeY * Math.cos(-rotSpeed);
+            }
+            // Turn left
+            if (keys['a']) {
+                // Rotate player direction vector
+                const oldDirX = dirX;
+                dirX = dirX * Math.cos(rotSpeed) - dirY * Math.sin(rotSpeed);
+                dirY = oldDirX * Math.sin(rotSpeed) + dirY * Math.cos(rotSpeed);
+                // Rotate camera plane vector
+                const oldPlaneX = planeX;
+                planeX = planeX * Math.cos(rotSpeed) - planeY * Math.sin(rotSpeed);
+                planeY = oldPlaneX * Math.sin(rotSpeed) + planeY * Math.cos(rotSpeed);
+            }
+
+            // Animate the moving cube's ceiling
+            if (cubeMovingUp) {
+                sectors[movingCubeSectorIndex].ceilingHeight += cubeSpeed;
+                if (sectors[movingCubeSectorIndex].ceilingHeight >= cubeMaxCeilingHeight) {
+                    sectors[movingCubeSectorIndex].ceilingHeight = cubeMaxCeilingHeight;
+                    cubeMovingUp = false;
+                }
+            } else {
+                sectors[movingCubeSectorIndex].ceilingHeight -= cubeSpeed;
+                if (sectors[movingCubeSectorIndex].ceilingHeight <= cubeMinCeilingHeight) {
+                    sectors[movingCubeSectorIndex].ceilingHeight = cubeMinCeilingHeight;
+                    cubeMovingUp = true;
+                }
+            }
+        }
+
+        /**
+         * Draws the entire scene using the raycasting algorithm,
+         * including walls, floors, and ceilings with varying heights.
+         */
+        function draw() {
+            // Clear the entire canvas
+            ctx.clearRect(0, 0, screenWidth, screenHeight);
+
+            // Get the current sector the player is in (for player's absolute Z height)
+            const currentSectorMapX = Math.floor(playerX);
+            const currentSectorMapY = Math.floor(playerY);
+            // Ensure player is within map bounds, otherwise default to sector 0
+            const playerCurrentSectorId = (currentSectorMapX >= 0 && currentSectorMapX < mapWidth &&
+                                           currentSectorMapY >= 0 && currentSectorMapY < mapHeight) ?
+                                          worldMap[currentSectorMapX][currentSectorMapY] : 0;
+            const playerCurrentSector = sectors[playerCurrentSectorId];
+
+            // Calculate player's absolute Z height in world units (relative to world origin Z=0)
+            const playerAbsoluteZ = playerCurrentSector.floorHeight + playerZ;
+
+            // Wall rendering loop
+            for (let x = 0; x < screenWidth; x++) {
+                // Calculate ray position and direction
+                const cameraX = 2 * x / screenWidth - 1; // X-coordinate on camera plane (-1 to 1)
+                const rayDirX = dirX + planeX * cameraX;
+                const rayDirY = dirY + planeY * cameraX;
+
+                // Which box of the map we're in
+                let mapX = Math.floor(playerX);
+                let mapY = Math.floor(playerY);
+
+                // Length of ray from current position to next x or y-side
+                let sideDistX;
+                let sideDistY;
+
+                // Length of ray from one x or y-side to the next x or y-side
+                const deltaDistX = Math.abs(1 / rayDirX);
+                const deltaDistY = Math.abs(1 / rayDirY);
+
+                // What direction to step in x or y-direction (+1 or -1)
+                let stepX;
+                let stepY;
+
+                let hit = 0; // Was there a wall hit?
+                let side; // Was a North/South wall (0) or East/West wall (1) hit?
+
+                // Calculate step and initial sideDist
+                if (rayDirX < 0) {
+                    stepX = -1;
+                    sideDistX = (playerX - mapX) * deltaDistX;
+                } else {
+                    stepX = 1;
+                    sideDistX = (mapX + 1.0 - playerX) * deltaDistX;
+                }
+                if (rayDirY < 0) {
+                    stepY = -1;
+                    sideDistY = (playerY - mapY) * deltaDistY;
+                } else {
+                    stepY = 1;
+                    sideDistY = (mapY + 1.0 - playerY) * deltaDistY;
+                }
+
+                // Perform DDA (Digital Differential Analysis)
+                while (hit === 0) {
+                    // Jump to next map square, either in x-direction, or in y-direction
+                    if (sideDistX < sideDistY) {
+                        sideDistX += deltaDistX;
+                        mapX += stepX;
+                        side = 0; // Hit a vertical wall (North/South facing)
+                    } else {
+                        sideDistY += deltaDistY;
+                        mapY += stepY;
+                        side = 1; // Hit a horizontal wall (East/West facing)
+                    }
+                    // Check if ray has hit a wall (map value is a valid sector ID)
+                    if (mapX >= 0 && mapX < mapWidth && mapY >= 0 && mapY < mapHeight &&
+                        worldMap[mapX][mapY] !== undefined) { // Check if it's a valid sector
+                        hit = 1;
+                    } else {
+                        // If ray goes out of bounds, stop
+                        hit = 2; // Indicate out of bounds
+                    }
+                }
+
+                if (hit === 2) {
+                    // If out of bounds, draw nothing for this column or default background
+                    zBuffer[x] = Infinity; // Mark as very far
+                    continue; // Move to next column
+                }
+
+                // Calculate distance projected on camera direction (Euclidean distance would give fish-eye effect)
+                let perpWallDist;
+                if (side === 0) {
+                    perpWallDist = (mapX - playerX + (1 - stepX) / 2) / rayDirX;
+                } else {
+                    perpWallDist = (mapY - playerY + (1 - stepY) / 2) / rayDirY;
+                }
+
+                // Store distance for floor/ceiling rendering (Z-buffer)
+                zBuffer[x] = perpWallDist;
+
+                // Get the sector ID of the wall that was hit
+                const hitWallSectorId = worldMap[mapX][mapY];
+                const hitWallSector = sectors[hitWallSectorId];
+
+                // Calculate screen Y coordinates for the current sector's floor and ceiling
+                // These define the "window" through which we see the wall
+                const currentFloorScreenY = screenHeight / 2 + (playerCurrentSector.floorHeight - playerAbsoluteZ) / perpWallDist * screenHeight;
+                const currentCeilingScreenY = screenHeight / 2 - (playerCurrentSector.ceilingHeight - playerAbsoluteZ) / perpWallDist * screenHeight;
+
+                // Calculate screen Y for the hit wall's floor and ceiling
+                // These define the actual height of the wall segment
+                const hitWallFloorScreenY = screenHeight / 2 + (hitWallSector.floorHeight - playerAbsoluteZ) / perpWallDist * screenHeight;
+                const hitWallCeilingScreenY = screenHeight / 2 - (hitWallSector.ceilingHeight - playerAbsoluteZ) / perpWallDist * screenHeight;
+
+                // Determine the base color for the wall segment
+                const wallColor = darkenColor(hitWallSector.wallColor, side === 1 ? 0.5 : 0); // Darken for side
+
+                // Draw the wall segments based on height differences (Sector over Sector effect)
+                // This draws the parts of the wall that block the view
+                // 1. Draw the part of the wall that is "below" the current sector's floor
+                //    (e.g., if the hit sector's floor is higher than current, creating a step up)
+                if (currentFloorScreenY < hitWallFloorScreenY) {
+                    ctx.fillStyle = wallColor;
+                    ctx.fillRect(x, currentFloorScreenY, 1, hitWallFloorScreenY - currentFloorScreenY);
+                }
+                // 2. Draw the part of the wall that is "above" the current sector's ceiling
+                //    (e.g., if the hit sector's ceiling is lower than current, creating a doorway)
+                if (currentCeilingScreenY > hitWallCeilingScreenY) {
+                    ctx.fillStyle = wallColor;
+                    ctx.fillRect(x, hitWallCeilingScreenY, 1, currentCeilingScreenY - hitWallCeilingScreenY);
+                }
+                // 3. Draw the main segment of the wall (the visible portion between the effective floor and ceiling)
+                //    This is the "portal" opening or the main wall itself.
+                ctx.fillStyle = wallColor;
+                ctx.fillRect(x, Math.max(currentCeilingScreenY, hitWallCeilingScreenY), 1, Math.min(currentFloorScreenY, hitWallFloorScreenY) - Math.max(currentCeilingScreenY, hitWallCeilingScreenY));
+            }
+
+            // Floor and Ceiling rendering (after walls, using zBuffer for depth)
+            // Iterate through horizontal scanlines from the middle of the screen outwards
+            for (let y = screenHeight / 2 + 1; y < screenHeight; y++) { // Iterate from middle down for floor
+                // Y-coordinate on screen, relative to the center of the screen
+                let p = y - screenHeight / 2;
+
+                // Vertical position of the camera relative to the screen's horizon (fixed for perspective)
+                let posZ = 0.5 * screenHeight;
+
+                // Horizontal distance from the camera to the floor/ceiling plane at this scanline
+                let rowDistance = posZ / p;
+
+                // Calculate the real world coordinates of the corresponding floor point for the left and right edges of the screen
+                const floorX_left = playerX + planeX * rowDistance - dirX * rowDistance;
+                const floorY_left = playerY + planeY * rowDistance - dirY * rowDistance;
+
+                const floorX_right = playerX - planeX * rowDistance - dirX * rowDistance;
+                const floorY_right = playerY - planeY * rowDistance - dirY * rowDistance;
+
+                for (let x = 0; x < screenWidth; x++) {
+                    // Calculate the current floor point (x,y) in world coordinates by interpolating between left and right
+                    const floorX = floorX_left + (floorX_right - floorX_left) * x / screenWidth;
+                    const floorY = floorY_left + (floorY_right - floorY_left) * x / screenWidth;
+
+                    // Get the map cell coordinates for the floor point
+                    const cellX = Math.floor(floorX);
+                    const cellY = Math.floor(floorY);
+
+                    // Ensure cell is within map bounds and has a valid sector
+                    if (cellX >= 0 && cellX < mapWidth && cellY >= 0 && cellY < mapHeight) {
+                        const sectorId = worldMap[cellX][cellY];
+                        const sector = sectors[sectorId];
+
+                        // Only draw if this floor point is closer than the wall at this column (Z-buffer check)
+                        if (rowDistance < zBuffer[x]) {
+                            // Draw floor pixel
+                            ctx.fillStyle = sector.floorColor;
+                            ctx.fillRect(x, y, 1, 1);
+
+                            // Draw ceiling pixel (symmetric to floor)
+                            // The ceiling pixel is at screenHeight - y - 1
+                            ctx.fillStyle = sector.ceilingColor;
+                            ctx.fillRect(x, screenHeight - y - 1, 1, 1);
+                        }
+                    }
+                }
+            }
+        }
+
+        /**
+         * Darkens a given hex color by a certain percentage.
+         * @param {string} hexColor - The color in hex format (e.g., '#RRGGBB').
+         * @param {number} percent - The percentage to darken (0.0 to 1.0).
+         * @returns {string} The darkened color in hex format.
+         */
+        function darkenColor(hexColor, percent) {
+            let r = parseInt(hexColor.substring(1, 3), 16);
+            let g = parseInt(hexColor.substring(3, 5), 16);
+            let b = parseInt(hexColor.substring(5, 7), 16);
+
+            r = Math.floor(r * (1 - percent));
+            g = Math.floor(g * (1 - percent));
+            b = Math.floor(b * (1 - percent));
+
+            return '#' +
+                   ('00' + r.toString(16)).slice(-2) +
+                   ('00' + g.toString(16)).slice(-2) +
+                   ('00' + b.toString(16)).slice(-2);
+        }
+
+        // Start the game loop when the window loads
+        window.onload = function() {
+            gameLoop();
+        };
+    </script>
+</body>
+</html>
