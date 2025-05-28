@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Doom/Build-like Hybrid Raycasting Demo</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden; /* Prevent scrollbars */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #222; /* Dark background */
+            font-family: 'Inter', sans-serif; /* Use Inter font */
+            color: #eee;
+        }
+
+        #game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #333;
+            padding: 20px;
+            border-radius: 15px; /* Rounded corners */
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            max-width: 90vw; /* Responsive width */
+            max-height: 90vh; /* Responsive height */
+            box-sizing: border-box; /* Include padding in width/height */
+        }
+
+        canvas {
+            background-color: #000; /* Canvas background */
+            display: block;
+            border: 2px solid #555;
+            border-radius: 8px; /* Rounded corners for canvas */
+            width: 100%; /* Make canvas fluid */
+            height: auto; /* Maintain aspect ratio */
+            max-width: 800px; /* Max width for desktop */
+            max-height: 600px; /* Max height for desktop */
+        }
+
+        #controls {
+            margin-top: 15px;
+            text-align: center;
+            font-size: 0.9em;
+            line-height: 1.4;
+        }
+
+        #controls p {
+            margin: 5px 0;
+        }
+
+        #fps-counter {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 5px 10px;
+            border-radius: 5px;
+            color: #00FF00;
+            font-family: monospace;
+            font-size: 1em;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <canvas id="gameCanvas"></canvas>
+        <div id="controls">
+            <p><strong>Controls:</strong></p>
+            <p><strong>W</strong> - Forward | <strong>S</strong> - Backward | <strong>A</strong> - Turn Left | <strong>D</strong> - Turn Right</p>
+            <p><strong>Space</strong> - Jump | <strong>C</strong> - Crouch | <strong>G</strong> - Shoot</p>
+        </div>
+    </div>
+    <div id="fps-counter">FPS: 0</div>
+
+    <script>
+        // Get the canvas element and its 2D rendering context
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const fpsCounter = document.getElementById('fps-counter');
+
+        // Game configuration
+        const screenWidth = 640; // Resolution width for rendering
+        const screenHeight = 480; // Resolution height for rendering
+        const mapWidth = 24; // Width of the game map
+        const mapHeight = 24; // Height of the game map
+        const targetFPS = 120;
+        const frameInterval = 1000 / targetFPS;
+        let lastFrameTime = 0;
+        let fps = 0;
+        let frameCount = 0;
+        let lastFpsUpdateTime = 0;
+
+        // Player properties
+        let playerX = 22.0; // Player's starting X position
+        let playerY = 11.5; // Player's starting Y position
+        let playerZ = 0.5;  // Player's Z height (eye level relative to current sector's floor, 0.0 to 1.0)
+        let playerHeight = 0.9; // Total height of the player (for collision and crouching)
+        let dirX = -1.0; // Player's initial direction vector X
+        let dirY = 0.0; // Player's initial direction vector Y
+        let planeX = 0.0; // Camera plane vector X (perpendicular to direction, defines FOV)
+        let planeY = 0.66; // Camera plane vector Y (0.66 for 66 degree FOV)
+        const moveSpeed = 0.06; // Player movement speed
+        const rotSpeed = 0.03; // Player rotation speed
+
+        // Jump variables
+        let isJumping = false;
+        let jumpVelocity = 0;
+        const jumpStrength = 0.08; // Initial upward velocity
+        const gravity = 0.005;     // Downward acceleration
+
+        // Crouch variables
+        let isCrouching = false;
+        const normalPlayerZ = 0.5;
+        const crouchPlayerZ = 0.2;
+        const crouchSpeed = 0.05; // Speed of crouching transition
+
+        // Weapon variables
+        let isShooting = false;
+        let shootTimer = 0;
+        const shootDuration = 100; // milliseconds for muzzle flash
+
+        // Define sectors with their properties (floorHeight, ceilingHeight, colors)
+        // Heights are normalized (0.0 to 1.0, where 1.0 is full map cell height)
+        // Each sector has a floor height, ceiling height, and distinct colors/patterns for floor, ceiling, and walls.
+        const sectors = [
+            { id: 0, floorHeight: 0.0, ceilingHeight: 1.0, floorColor: '#666666', ceilingColor: '#87CEEB', wallColor: '#FF0000' }, // Sector 0: Default (Red walls)
+            { id: 1, floorHeight: 0.0, ceilingHeight: 0.5, floorColor: '#555555', ceilingColor: '#AAAAAA', wallColor: '#00FF00' }, // Sector 1: Lower Ceiling (Green walls)
+            { id: 2, floorHeight: 0.2, ceilingHeight: 1.0, floorColor: '#777777', ceilingColor: '#87CEEB', wallColor: '#0000FF' }, // Sector 2: Raised Floor (Blue walls)
+            { id: 3, floorHeight: 0.0, ceilingHeight: 1.0, floorColor: '#444444', ceilingColor: '#BBBBBB', wallColor: '#FFFF00' }, // Sector 3: Yellow walls (for moving cube)
+            { id: 4, floorHeight: 0.1, ceilingHeight: 0.9, floorColor: '#333333', ceilingColor: '#CCCCCC', wallColor: '#FF00FF' }, // Sector 4: Magenta walls (Stair step 1)
+            { id: 5, floorHeight: 0.2, ceilingHeight: 0.9, floorColor: '#333333', ceilingColor: '#CCCCCC', wallColor: '#FF00FF' }, // Sector 5: Magenta walls (Stair step 2)
+            { id: 6, floorHeight: 0.3, ceilingHeight: 0.9, floorColor: '#333333', ceilingColor: '#CCCCCC', wallColor: '#FF00FF' }, // Sector 6: Magenta walls (Stair step 3)
+            { id: 7, floorHeight: 0.4, ceilingHeight: 0.9, floorColor: '#333333', ceilingColor: '#CCCCCC', wallColor: '#FF00FF' }, // Sector 7: Magenta walls (Stair step 4)
+        ];
+
+        // Map now stores sector IDs instead of just 0/1
+        // Each number represents an index into the `sectors` array
+        const worldMap = [
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,2,0,2,0,2,0,0,0,0],
+            [0,0,0,0,0,0,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,1,0,0,0,1,0,0,0,0,2,0,0,0,2,0,0,0,0],
+            [0,0,0,0,0,0,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,1,1,0,1,1,0,0,0,0,2,0,2,0,2,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,3,3,3,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,3,0,3,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,3,0,0,0,0,4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0], // Staircase (sectors 4,5,6,7)
+            [0,3,0,3,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,3,0,3,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+        ];
+
+        // For the moving cube/platform animation
+        const movingCubeSectorIndex = 3; // Index of the sector for the moving cube area (yellow walls)
+        const cubeMinCeilingHeight = 0.2; // Lowest point the cube will go
+        const cubeMaxCeilingHeight = 0.8; // Highest point the cube will go
+        let cubeMovingUp = true; // Direction of cube movement
+        const cubeSpeed = 0.001; // Speed at which the cube moves
+
+        // Key states
+        const keys = {};
+        window.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            if (e.key.toLowerCase() === ' ') { // Space for jump
+                e.preventDefault(); // Prevent page scrolling
+                if (!isJumping) {
+                    isJumping = true;
+                    jumpVelocity = jumpStrength;
+                }
+            }
+            if (e.key.toLowerCase() === 'g') { // G for shoot
+                if (!isShooting) {
+                    isShooting = true;
+                    shootTimer = shootDuration;
+                }
+            }
+            if (e.key.toLowerCase() === 'c') { // C for crouch
+                isCrouching = true;
+            }
+        });
+        window.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+            if (e.key.toLowerCase() === 'c') { // C for crouch
+                isCrouching = false;
+            }
+        });
+
+        // Z-buffer for depth sorting (stores distance to nearest wall for each column)
+        const zBuffer = new Array(screenWidth);
+
+        // --- 3D Model Data (Simple Cube) ---
+        // Vertices for a unit cube centered at origin
+        const cubeVertices = [
+            [-0.5, -0.5, -0.5], // 0
+            [ 0.5, -0.5, -0.5], // 1
+            [ 0.5,  0.5, -0.5], // 2
+            [-0.5,  0.5, -0.5], // 3
+            [-0.5, -0.5,  0.5], // 4
+            [ 0.5, -0.5,  0.5], // 5
+            [ 0.5,  0.5,  0.5], // 6
+            [-0.5,  0.5,  0.5]  // 7
+        ];
+
+        // Faces (indices into cubeVertices) and their colors
+        // Order matters for back-to-front drawing (simplified for demo)
+        const cubeFaces = [
+            { indices: [0, 1, 2, 3], color: '#800000' }, // Front (dark red)
+            { indices: [4, 5, 6, 7], color: '#008000' }, // Back (dark green)
+            { indices: [0, 4, 7, 3], color: '#000080' }, // Left (dark blue)
+            { indices: [1, 5, 6, 2], color: '#808000' }, // Right (dark yellow)
+            { indices: [3, 2, 6, 7], color: '#800080' }, // Top (dark magenta)
+            { indices: [0, 1, 5, 4], color: '#008080' }  // Bottom (dark cyan)
+        ];
+
+        // Test Enemy (Cube)
+        const enemies = [
+            { x: 10.5, y: 10.5, z: 0.5, rotationY: 0, model: { vertices: cubeVertices, faces: cubeFaces }, size: 0.8, speed: 0.005, target: { x: 12.5, y: 10.5 } }
+        ];
+
+        // Test Weapon (simple rectangle for now)
+        const playerWeapon = {
+            width: screenWidth * 0.4,
+            height: screenHeight * 0.3,
+            offsetX: screenWidth * 0.3,
+            offsetY: screenHeight * 0.7,
+            color: '#888888',
+            muzzleFlashColor: '#FFA500',
+            muzzleFlashSize: 0.1 // relative to weapon width
+        };
+
+        /**
+         * Resizes the canvas to fit the container and maintains aspect ratio.
+         */
+        function resizeCanvas() {
+            const container = document.getElementById('game-container');
+            const containerWidth = container.clientWidth - 40; // Account for padding
+            const containerHeight = container.clientHeight - 40 - document.getElementById('controls').offsetHeight;
+
+            // Calculate target dimensions based on aspect ratio
+            let targetWidth = containerWidth;
+            let targetHeight = containerWidth * (screenHeight / screenWidth);
+
+            if (targetHeight > containerHeight) {
+                targetHeight = containerHeight;
+                targetWidth = containerHeight * (screenWidth / screenHeight);
+            }
+
+            canvas.style.width = `${targetWidth}px`;
+            canvas.style.height = `${targetHeight}px`;
+
+            // Set internal canvas resolution (important for drawing quality)
+            canvas.width = screenWidth;
+            canvas.height = screenHeight;
+        }
+
+        // Initial resize and add event listener for window resize
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas(); // Call once to set initial size
+
+        /**
+         * Main game loop function.
+         * This function is responsible for updating game state and rendering the scene.
+         */
+        function gameLoop(currentTime) {
+            requestAnimationFrame(gameLoop);
+
+            const deltaTime = currentTime - lastFrameTime;
+
+            // Cap FPS to target
+            if (deltaTime < frameInterval) {
+                return;
+            }
+
+            lastFrameTime = currentTime - (deltaTime % frameInterval);
+
+            // Update FPS counter
+            frameCount++;
+            if (currentTime - lastFpsUpdateTime >= 1000) {
+                fps = frameCount;
+                frameCount = 0;
+                lastFpsUpdateTime = currentTime;
+                fpsCounter.textContent = `FPS: ${fps}`;
+            }
+
+            update(); // Update player position and direction, and animate elements
+            draw();   // Render the scene
+        }
+
+        /**
+         * Updates the player's position and direction based on keyboard input.
+         * Also handles the animation of the moving cube, jumping, crouching, and shooting.
+         */
+        function update() {
+            // Get the current sector the player is in for collision detection
+            const currentSectorMapX = Math.floor(playerX);
+            const currentSectorMapY = Math.floor(playerY);
+            const playerCurrentSectorId = (currentSectorMapX >= 0 && currentSectorMapX < mapWidth &&
+                                     currentSectorMapY >= 0 && currentSectorMapY < mapHeight) ?
+                                    worldMap[currentSectorMapX][currentSectorMapY] : 0; // Default to sector 0 if out of bounds
+            const playerCurrentSector = sectors[playerCurrentSectorId];
+
+            // Player Z height adjustment (crouch)
+            if (isCrouching) {
+                playerZ = Math.max(crouchPlayerZ, playerZ - crouchSpeed);
+            } else {
+                playerZ = Math.min(normalPlayerZ, playerZ + crouchSpeed);
+            }
+
+            // Player Z height adjustment (jump/gravity)
+            if (isJumping) {
+                playerZ += jumpVelocity;
+                jumpVelocity -= gravity;
+
+                // Land on current sector's floor
+                if (playerZ <= normalPlayerZ) { // Simplified landing, assumes normalPlayerZ is floor level
+                    playerZ = normalPlayerZ;
+                    isJumping = false;
+                    jumpVelocity = 0;
+                }
+            } else {
+                // Apply gravity if not on floor (e.g., walking off a ledge)
+                if (playerZ > normalPlayerZ) {
+                    playerZ += jumpVelocity;
+                    jumpVelocity -= gravity;
+                    if (playerZ <= normalPlayerZ) {
+                        playerZ = normalPlayerZ;
+                        jumpVelocity = 0;
+                    }
+                }
+            }
+
+            // Movement and collision
+            let moveDirX = 0;
+            let moveDirY = 0;
+
+            if (keys['w']) {
+                moveDirX += dirX;
+                moveDirY += dirY;
+            }
+            if (keys['s']) {
+                moveDirX -= dirX;
+                moveDirY -= dirY;
+            }
+
+            // Normalize movement vector if moving diagonally
+            if (moveDirX !== 0 || moveDirY !== 0) {
+                const magnitude = Math.sqrt(moveDirX * moveDirX + moveDirY * moveDirY);
+                moveDirX /= magnitude;
+                moveDirY /= magnitude;
+            }
+
+            const newPlayerX = playerX + moveDirX * moveSpeed;
+            const newPlayerY = playerY + moveDirY * moveSpeed;
+
+            // Simple collision detection with map cells (check if new position is a valid sector)
+            const checkCollision = (px, py, currentSectorData) => { // Added currentSectorData parameter
+                const mapCellX = Math.floor(px);
+                const mapCellY = Math.floor(py);
+
+                if (mapCellX < 0 || mapCellX >= mapWidth || mapCellY < 0 || mapCellY >= mapHeight) {
+                    return true; // Out of bounds, treat as collision
+                }
+
+                const destSectorId = worldMap[mapCellX][mapCellY];
+                if (destSectorId === undefined) { // No sector defined, treat as wall
+                    return true;
+                }
+                const destSector = sectors[destSectorId];
+
+                // Check if destination floor is too high to step onto
+                // Or if current player height + playerHeight is greater than destination ceiling
+                const playerTop = currentSectorData.floorHeight + playerZ + playerHeight; // Use currentSectorData
+                const destBottom = destSector.floorHeight;
+                const destTop = destSector.ceilingHeight;
+
+                // If stepping up too high, or if player's head hits ceiling
+                if (destBottom > currentSectorData.floorHeight + 0.2 || playerTop > destTop) { // Use currentSectorData
+                    return true;
+                }
+
+                return false; // No collision
+            };
+
+            // Apply movement if no collision
+            if (!checkCollision(newPlayerX, playerY, playerCurrentSector)) { // Pass playerCurrentSector
+                playerX = newPlayerX;
+            }
+            if (!checkCollision(playerX, newPlayerY, playerCurrentSector)) { // Pass playerCurrentSector
+                playerY = newPlayerY;
+            }
+
+
+            // Rotation
+            if (keys['d']) {
+                const oldDirX = dirX;
+                dirX = dirX * Math.cos(-rotSpeed) - dirY * Math.sin(-rotSpeed);
+                dirY = oldDirX * Math.sin(-rotSpeed) + dirY * Math.cos(-rotSpeed);
+                const oldPlaneX = planeX;
+                planeX = planeX * Math.cos(-rotSpeed) - planeY * Math.sin(-rotSpeed);
+                planeY = oldPlaneX * Math.sin(-rotSpeed) + planeY * Math.cos(-rotSpeed);
+            }
+            if (keys['a']) {
+                const oldDirX = dirX;
+                dirX = dirX * Math.cos(rotSpeed) - dirY * Math.sin(rotSpeed);
+                dirY = oldDirX * Math.sin(rotSpeed) + dirY * Math.cos(rotSpeed);
+                const oldPlaneX = planeX;
+                planeX = planeX * Math.cos(rotSpeed) - planeY * Math.sin(rotSpeed);
+                planeY = oldPlaneX * Math.sin(rotSpeed) + planeY * Math.cos(rotSpeed);
+            }
+
+            // Animate the moving cube's ceiling
+            if (cubeMovingUp) {
+                sectors[movingCubeSectorIndex].ceilingHeight += cubeSpeed;
+                if (sectors[movingCubeSectorIndex].ceilingHeight >= cubeMaxCeilingHeight) {
+                    sectors[movingCubeSectorIndex].ceilingHeight = cubeMaxCeilingHeight;
+                    cubeMovingUp = false;
+                }
+            } else {
+                sectors[movingCubeSectorIndex].ceilingHeight -= cubeSpeed;
+                if (sectors[movingCubeSectorIndex].ceilingHeight <= cubeMinCeilingHeight) {
+                    sectors[movingCubeSectorIndex].ceilingHeight = cubeMinCeilingHeight;
+                    cubeMovingUp = true;
+                }
+            }
+
+            // Animate enemy cube
+            enemies.forEach(enemy => {
+                const dx = enemy.target.x - enemy.x;
+                const dy = enemy.target.y - enemy.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist > enemy.speed) {
+                    enemy.x += (dx / dist) * enemy.speed;
+                    enemy.y += (dy / dist) * enemy.speed;
+                    enemy.rotationY += 0.05; // Simple rotation
+                } else {
+                    // Simple target switching for demo
+                    const tempTargetX = enemy.target.x;
+                    const tempTargetY = enemy.target.y;
+                    enemy.target.x = enemy.x;
+                    enemy.target.y = enemy.y;
+                    enemy.x = tempTargetX;
+                    enemy.y = tempTargetY;
+                }
+            });
+
+            // Update shooting state
+            if (isShooting && shootTimer > 0) {
+                shootTimer -= frameInterval;
+                if (shootTimer <= 0) {
+                    isShooting = false;
+                }
+            }
+        }
+
+        /**
+         * Draws the entire scene using the raycasting algorithm for walls/floors/ceilings,
+         * and a simplified 3D projection for models.
+         */
+        function draw() {
+            // Clear the entire canvas
+            ctx.clearRect(0, 0, screenWidth, screenHeight);
+
+            // Get the current sector the player is in (for player's absolute Z height)
+            const currentSectorMapX = Math.floor(playerX);
+            const currentSectorMapY = Math.floor(playerY);
+            const playerCurrentSectorId = (currentSectorMapX >= 0 && currentSectorMapX < mapWidth &&
+                                           currentSectorMapY >= 0 && currentSectorMapY < mapHeight) ?
+                                          worldMap[currentSectorMapX][currentSectorMapY] : 0;
+            const playerCurrentSector = sectors[playerCurrentSectorId];
+
+            // Calculate player's absolute Z height in world units (relative to world origin Z=0)
+            const playerAbsoluteZ = playerCurrentSector.floorHeight + playerZ;
+
+            // --- Wall rendering loop (Raycasting) ---
+            for (let x = 0; x < screenWidth; x++) {
+                // Calculate ray position and direction
+                const cameraX = 2 * x / screenWidth - 1; // X-coordinate on camera plane (-1 to 1)
+                const rayDirX = dirX + planeX * cameraX;
+                const rayDirY = dirY + planeY * cameraX;
+
+                // Which box of the map we're in
+                let mapX = Math.floor(playerX);
+                let mapY = Math.floor(playerY);
+
+                // Length of ray from current position to next x or y-side
+                let sideDistX;
+                let sideDistY;
+
+                // Length of ray from one x or y-side to the next x or y-side
+                const deltaDistX = Math.abs(1 / rayDirX);
+                const deltaDistY = Math.abs(1 / rayDirY);
+
+                // What direction to step in x or y-direction (+1 or -1)
+                let stepX;
+                let stepY;
+
+                let hit = 0; // Was there a wall hit? (0=no, 1=yes, 2=out of bounds)
+                let side; // Was a North/South wall (0) or East/West wall (1) hit?
+
+                // Calculate step and initial sideDist
+                if (rayDirX < 0) {
+                    stepX = -1;
+                    sideDistX = (playerX - mapX) * deltaDistX;
+                } else {
+                    stepX = 1;
+                    sideDistX = (mapX + 1.0 - playerX) * deltaDistX;
+                }
+                if (rayDirY < 0) {
+                    stepY = -1;
+                    sideDistY = (playerY - mapY) * deltaDistY;
+                } else {
+                    stepY = 1;
+                    sideDistY = (mapY + 1.0 - playerY) * deltaDistY;
+                }
+
+                // Perform DDA (Digital Differential Analysis)
+                while (hit === 0) {
+                    if (sideDistX < sideDistY) {
+                        sideDistX += deltaDistX;
+                        mapX += stepX;
+                        side = 0;
+                    } else {
+                        sideDistY += deltaDistY;
+                        mapY += stepY;
+                        side = 1;
+                    }
+
+                    if (mapX < 0 || mapX >= mapWidth || mapY < 0 || mapY >= mapHeight) {
+                        hit = 2; // Out of bounds
+                    } else if (worldMap[mapX][mapY] !== undefined) {
+                        hit = 1; // Hit a valid sector (wall)
+                    }
+                }
+
+                let perpWallDist;
+                if (hit === 1) {
+                    if (side === 0) {
+                        perpWallDist = (mapX - playerX + (1 - stepX) / 2) / rayDirX;
+                    } else {
+                        perpWallDist = (mapY - playerY + (1 - stepY) / 2) / rayDirY;
+                    }
+                } else { // Out of bounds, set a very far distance
+                    perpWallDist = Infinity;
+                }
+
+                // Store distance for Z-buffer
+                zBuffer[x] = perpWallDist;
+
+                if (hit === 1) {
+                    const hitWallSectorId = worldMap[mapX][mapY];
+                    const hitWallSector = sectors[hitWallSectorId];
+
+                    // Calculate screen Y coordinates for the current sector's effective floor and ceiling
+                    const currentFloorScreenY = screenHeight / 2 + (playerCurrentSector.floorHeight - playerAbsoluteZ) / perpWallDist * screenHeight;
+                    const currentCeilingScreenY = screenHeight / 2 - (playerCurrentSector.ceilingHeight - playerAbsoluteZ) / perpWallDist * screenHeight;
+
+                    // Calculate screen Y for the hit wall's actual floor and ceiling
+                    const hitWallFloorScreenY = screenHeight / 2 + (hitWallSector.floorHeight - playerAbsoluteZ) / perpWallDist * screenHeight;
+                    const hitWallCeilingScreenY = screenHeight / 2 - (hitWallSector.ceilingHeight - playerAbsoluteZ) / perpWallDist * screenHeight;
+
+                    // Determine the base color for the wall segment
+                    const wallColor = darkenColor(hitWallSector.wallColor, side === 1 ? 0.5 : 0); // Darken for side
+
+                    // Draw the wall segments based on height differences (Sector over Sector effect)
+                    // 1. Draw the part of the wall that is "below" the current sector's floor
+                    if (currentFloorScreenY < hitWallFloorScreenY) {
+                        ctx.fillStyle = wallColor;
+                        ctx.fillRect(x, currentFloorScreenY, 1, hitWallFloorScreenY - currentFloorScreenY);
+                    }
+                    // 2. Draw the part of the wall that is "above" the current sector's ceiling
+                    if (currentCeilingScreenY > hitWallCeilingScreenY) {
+                        ctx.fillStyle = wallColor;
+                        ctx.fillRect(x, hitWallCeilingScreenY, 1, currentCeilingScreenY - hitWallCeilingScreenY);
+                    }
+                    // 3. Draw the main segment of the wall (the visible portion between the effective floor and ceiling)
+                    ctx.fillStyle = wallColor;
+                    ctx.fillRect(x, Math.max(currentCeilingScreenY, hitWallCeilingScreenY), 1, Math.min(currentFloorScreenY, hitWallFloorScreenY) - Math.max(currentCeilingScreenY, hitWallCeilingScreenY));
+                }
+            }
+
+            // --- Floor and Ceiling rendering (after walls, using zBuffer for depth) ---
+            for (let y = screenHeight / 2 + 1; y < screenHeight; y++) { // Iterate from middle down for floor
+                let p = y - screenHeight / 2; // Vertical position relative to the center of the screen
+                let posZ = 0.5 * screenHeight; // Constant for perspective projection
+
+                let rowDistance = posZ / p;
+
+                // Calculate the real world coordinates of the corresponding floor point for the left and right edges of the screen
+                const floorX_left = playerX + planeX * rowDistance - dirX * rowDistance;
+                const floorY_left = playerY + planeY * rowDistance - dirY * rowDistance;
+
+                const floorX_right = playerX - planeX * rowDistance - dirX * rowDistance;
+                const floorY_right = playerY - planeY * rowDistance - dirY * rowDistance;
+
+                for (let x = 0; x < screenWidth; x++) {
+                    // Calculate the current floor point (x,y) in world coordinates by interpolating between left and right
+                    const floorX = floorX_left + (floorX_right - floorX_left) * x / screenWidth;
+                    const floorY = floorY_left + (floorY_right - floorY_left) * x / screenWidth;
+
+                    // Get the map cell coordinates for the floor point
+                    const cellX = Math.floor(floorX);
+                    const cellY = Math.floor(floorY);
+
+                    // Ensure cell is within map bounds and has a valid sector
+                    if (cellX >= 0 && cellX < mapWidth && cellY >= 0 && cellY < mapHeight) {
+                        const sectorId = worldMap[cellX][cellY];
+                        const sector = sectors[sectorId];
+
+                        // Only draw if this floor point is closer than the wall at this column (Z-buffer check)
+                        if (rowDistance < zBuffer[x]) {
+                            // Draw floor pixel
+                            ctx.fillStyle = sector.floorColor;
+                            ctx.fillRect(x, y, 1, 1);
+
+                            // Draw ceiling pixel (symmetric to floor)
+                            ctx.fillStyle = sector.ceilingColor;
+                            ctx.fillRect(x, screenHeight - y - 1, 1, 1);
+                        }
+                    }
+                }
+            }
+
+            // --- 3D Model Rendering (Cube Enemy) ---
+            enemies.forEach(enemy => {
+                // Transform vertices to camera space
+                const transformedVertices = enemy.model.vertices.map(v => {
+                    // Translate to world position
+                    let worldX = v[0] * enemy.size + enemy.x;
+                    let worldY = v[1] * enemy.size + enemy.y;
+                    let worldZ = v[2] * enemy.size + enemy.z;
+
+                    // Rotate around Y axis (enemy.rotationY)
+                    const cosRot = Math.cos(enemy.rotationY);
+                    const sinRot = Math.sin(enemy.rotationY);
+                    const rotatedX = worldX; // Assuming rotation around local Y, so X and Z change
+                    const rotatedZ = worldZ * cosRot - worldX * sinRot; // This is a simplified rotation, might need adjustment
+
+                    // Translate to camera space (relative to player)
+                    let camX = rotatedX - playerX;
+                    let camY = worldY - playerAbsoluteZ; // Y is up/down
+                    let camZ = rotatedZ - playerY; // Z is depth
+
+                    // Apply player's inverse rotation (camera rotation)
+                    const invDet = 1.0 / (planeX * dirY - dirX * planeY); // Inverse of determinant
+                    const tX = camX * dirY - camZ * planeY;
+                    const tZ = camZ * dirX - camX * dirY;
+                    camX = tX * invDet;
+                    camZ = tZ * invDet;
+
+                    return [camX, camY, camZ];
+                });
+
+                // Project to 2D screen coordinates and store depth
+                const projectedVertices = transformedVertices.map(v => {
+                    const invZ = 1.0 / v[2]; // Perspective division
+                    const screenX = (0.5 + v[0] * invZ) * screenWidth;
+                    const screenY = (0.5 - v[1] * invZ) * screenHeight; // Y-axis is inverted on screen
+                    return { x: screenX, y: screenY, z: v[2] }; // Store Z for depth
+                });
+
+                // Sort faces by average Z-depth (back-to-front for simplified rendering)
+                const sortedFaces = [...enemy.model.faces].sort((a, b) => {
+                    const avgZA = a.indices.reduce((sum, idx) => sum + projectedVertices[idx].z, 0) / a.indices.length;
+                    const avgZB = b.indices.reduce((sum, idx) => sum + projectedVertices[idx].z, 0) / b.indices.length;
+                    return avgZB - avgZA; // Sort descending Z (far to near)
+                });
+
+                sortedFaces.forEach(face => {
+                    // Check if face is behind camera
+                    const avgZ = face.indices.reduce((sum, idx) => sum + projectedVertices[idx].z, 0) / face.indices.length;
+                    if (avgZ < 0.1) return; // Don't draw if too close or behind camera
+
+                    ctx.fillStyle = face.color;
+                    ctx.beginPath();
+                    face.indices.forEach((idx, i) => {
+                        const p = projectedVertices[idx];
+                        // Simple Z-buffer check for each vertex of the face.
+                        // This is a rough check; for proper 3D, a per-pixel Z-buffer is needed.
+                        // Here, we just check if any part of the face is behind a wall.
+                        if (p.x >= 0 && p.x < screenWidth && p.z < zBuffer[Math.floor(p.x)]) {
+                            if (i === 0) {
+                                ctx.moveTo(p.x, p.y);
+                            } else {
+                                ctx.lineTo(p.x, p.y);
+                            }
+                        }
+                    });
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.strokeStyle = '#000000'; // Black outline
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                });
+            });
+
+            // --- Draw Test Weapon ---
+            ctx.fillStyle = playerWeapon.color;
+            ctx.fillRect(playerWeapon.offsetX, playerWeapon.offsetY, playerWeapon.width, playerWeapon.height);
+
+            // Draw muzzle flash if shooting
+            if (isShooting) {
+                ctx.fillStyle = playerWeapon.muzzleFlashColor;
+                const flashWidth = playerWeapon.width * playerWeapon.muzzleFlashSize;
+                const flashHeight = playerWeapon.height * playerWeapon.muzzleFlashSize;
+                ctx.fillRect(playerWeapon.offsetX + playerWeapon.width - flashWidth, playerWeapon.offsetY - flashHeight, flashWidth, flashHeight);
+            }
+        }
+
+        /**
+         * Darkens a given hex color by a certain percentage.
+         * @param {string} hexColor - The color in hex format (e.g., '#RRGGBB').
+         * @param {number} percent - The percentage to darken (0.0 to 1.0).
+         * @returns {string} The darkened color in hex format.
+         */
+        function darkenColor(hexColor, percent) {
+            let r = parseInt(hexColor.substring(1, 3), 16);
+            let g = parseInt(hexColor.substring(3, 5), 16);
+            let b = parseInt(hexColor.substring(5, 7), 16);
+
+            r = Math.floor(r * (1 - percent));
+            g = Math.floor(g * (1 - percent));
+            b = Math.floor(b * (1 - percent));
+
+            return '#' +
+                   ('00' + r.toString(16)).slice(-2) +
+                   ('00' + g.toString(16)).slice(-2) +
+                   ('00' + b.toString(16)).slice(-2);
+        }
+
+        // Start the game loop when the window loads
+        window.onload = function() {
+            gameLoop(0); // Pass initial time 0
